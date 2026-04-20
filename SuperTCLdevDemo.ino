@@ -1,16 +1,23 @@
 /*****************************************************************************
  * SuperTCLdevDemo.ino
- * Version 1.2.1
- *
- * Notes:  Needs better comments and docs!
+ * Version 1.2.3
  *
  * Code now detects for type of momentary switch, to compensate for a manufacturing
  * issue with the TCL Dev Shields, as well as whether a TCL Developer or Simple Board
- * is installed.  If a TCL SImple Board is installed, it defaults to running
- * rainbling() with a set of visually appealing presets.
+ * is installed.  If a TCL Simple Board is installed, it defaults to running
+ * rainBling() with a set of visually appealing presets.
+ *
+ * New in 1.2.3
+ * Fix:     Hardened EEPROM settings handling.
+ *          - NumberOfLEDs is clamped to 1..MAXLEDS on read/write.
+ *          - Skipped writes now require both matching value and valid checksum.
+ *          - Invalid EEPROM data is self-healed with a safe value.
+ *          - Unchanged valid values are not rewritten, reducing EEPROM wear.
+ * Cleanup: Removed unused variables and dead code paths to reduce SRAM usage and simplify the sketch.
+ * Guard:   Added an all-zero input guard in check_color_pots() to keep future color math safe.
  *
  * New in 1.2.2
- * Fix:     Fixed a bug in the lengh-setting code that caused excessive and unnecessary writes to 
+ * Fix:     Fixed a bug in the length-setting code that caused excessive and unnecessary writes to
  *          the EEPROM.
  *
  * New in 1.2.1
@@ -33,7 +40,7 @@
  * Fix:  Resolved issue where strands larger than 25 didn't clear pixels after 25 when the length had not been manually adjusted.
  *
  * New in 1.1.x
- * User can dymacially adjust the length of the active pixels in the strand by holding
+ * User can dynamically adjust the length of the active pixels in the strand by holding
  * down Momentary 1 (Pin 4) and turning the lower right Analog Potentiometer (Pin 0)
  *
  * cylon_eye() looks like a certain retro science fiction special effect.
@@ -41,7 +48,7 @@
  * rainBling() is a HSV rainbow, with bonus lightning effects.
  *
  * FireStrand() will send a flickering fire sequence down the strand of TCL pixels.
- * Several of the attributes are dunamically adjustable:
+ * Several of the attributes are dynamically adjustable:
  *
  * Fire mode adjustments:
  *
@@ -68,7 +75,7 @@
 
 
 const int MAXLEDS = 400; // Maximum number of LEDs that this demo will address
-int ACTIVELEDS = 200;  // User can dymamically adjust this after program starts running
+int ACTIVELEDS = 200;  // User can dynamically adjust this after program starts running
 
 byte strand[MAXLEDS][3]; // 0=R, 1=G, 2=B
 
@@ -78,15 +85,24 @@ struct SettingsObject {
   int checksum;
 };
 
+int clampLEDCount(int value) {
+  if (value < 1) {
+    return 1;
+  }
+  if (value > MAXLEDS) {
+    return MAXLEDS;
+  }
+  return value;
+}
+
+int settingsChecksum(int ledCount) {
+  return ((ledCount + 69) * 42);
+}
+
 // Absolute colors for the pixels
 byte RED = 0;
 byte BLUE = 0;
 byte GREEN = 0;
-float ratioRED;
-float ratioBLUE;
-float ratioGREEN;
-int colorSUM;
-float ratioHIGHEST;
 
 // Define the min and max delay between iterations
 #define DELAYLOW 10
@@ -98,6 +114,20 @@ int MOMENTARY1_Initial_State;
 int MOMENTARY2_Initial_State;
 int TCL_SWITCH1_Initial_State;
 int TCL_SWITCH2_Initial_State;
+
+/*
+ * Control map (Developer Shield mode):
+ *   SWITCH1 + SWITCH2 select effect mode:
+ *     00 -> FireStrand
+ *     01 -> cylon_eye
+ *     10 -> color_picker
+ *     11 -> rainBling
+ *
+ *   Hold MOMENTARY2 and turn POT2 to adjust ACTIVELEDS (1..MAXLEDS).
+ *   ACTIVELEDS is persisted to EEPROM and restored at boot.
+ *
+ *   POT assignments vary slightly per mode (see function comments).
+ */
 
 //  BEGIN - Variables and constants for rainbling subroutine
 byte rain_gamma_table[256];
@@ -112,9 +142,10 @@ float rain_hval;
 
 // This is for new code that tries to determine whether the TCL Developer Shield is installed, or the Simple Shield
 // Assume simple shield, unless proven otherwise
-int DevSheildInstalled = 0;
+int DevShieldInstalled = 0;
 
 
+// Initialize TCL hardware, restore persisted settings, and precompute gamma table.
 void setup() {
   TCL.begin();
   TCL.setupDeveloperShield();
@@ -137,6 +168,7 @@ void setup() {
 
 }
 
+// Poll controls and run the currently selected effect.
 void loop() {
   CheckSwitches();
 
@@ -157,6 +189,8 @@ void loop() {
 
 }
 
+// Fire-like animation.
+// POT1: speed, POT3: warmth/chromatography, POT4: intensity.
 void FireStrand() {
   int i;
   int red;
@@ -204,13 +238,14 @@ void sendPixelData( int red, int green, int blue) {
 
 
 
+// Detect board input changes, update mode selection, and handle strand-length edit mode.
 void CheckSwitches() {
 
-  // This alows Simple Shield Mode to be disabled if a switch change is detected.
+  // This allows Simple Shield Mode to be disabled if a switch change is detected.
   // This helps defend against false positives in the shield detection code.
-  if ( 0 == DevSheildInstalled ) {
+  if ( 0 == DevShieldInstalled ) {
     if ( (TCL_SWITCH1_Initial_State != digitalRead(TCL_SWITCH1)) || (TCL_SWITCH2_Initial_State != digitalRead(TCL_SWITCH2)) || (digitalRead(TCL_MOMENTARY1) != MOMENTARY1_Initial_State) || (digitalRead(TCL_MOMENTARY2) != MOMENTARY2_Initial_State) ) {
-      DevSheildInstalled = 1;
+      DevShieldInstalled = 1;
       reset_strand();
     }
   }
@@ -219,17 +254,17 @@ void CheckSwitches() {
   // and turning the lower right Analog Potentiometer (Pin 0)
   if (digitalRead(TCL_MOMENTARY2) != MOMENTARY2_Initial_State) {
     while (digitalRead(TCL_MOMENTARY2) != MOMENTARY2_Initial_State) {
-      int led_posiiton;
+      int led_position;
       ACTIVELEDS=(int)map(analogRead(TCL_POT2), 0, 1023, 1, MAXLEDS);
       TCL.sendEmptyFrame();
-      for (led_posiiton = 1; led_posiiton < ACTIVELEDS; led_posiiton++) {
+      for (led_position = 1; led_position < ACTIVELEDS; led_position++) {
         TCL.sendColor(255,0,0);
       }
       TCL.sendColor(0,0,255);
-      led_posiiton++;
-      while (led_posiiton < MAXLEDS) {
+      led_position++;
+      while (led_position < MAXLEDS) {
         TCL.sendColor(0,0,0);
-        led_posiiton++;
+        led_position++;
       }
       TCL.sendEmptyFrame();
     }
@@ -237,7 +272,7 @@ void CheckSwitches() {
   }
 
 
-  if ( 1 == DevSheildInstalled ) {
+  if ( 1 == DevShieldInstalled ) {
     if (digitalRead(TCL_SWITCH1) == 0 && digitalRead(TCL_SWITCH2) == 0){
       SWITCHSTATE = 3;
     }
@@ -285,6 +320,8 @@ void update_strand() {
   TCL.sendEmptyFrame();
 }
 
+// Scanner effect with trailing fade.
+// POT1-3: color, POT4: sweep delay.
 void cylon_eye() {
   int i;
   int j; // The lag counter
@@ -363,6 +400,7 @@ void cylon_eye() {
   reset_strand();
 }
 
+// Read current RGB color from POT1-3.
 void check_color_pots() {
     /* Read the current red value from potentiometer 0 */
     RED=map(analogRead(TCL_POT1), 0, 1023, 0, 255);
@@ -371,25 +409,17 @@ void check_color_pots() {
     /* Read the current blue value from potentiometer 2 */
     BLUE=map(analogRead(TCL_POT3), 0, 1023, 0, 255);
 
-    int colorSUM = (RED + BLUE + GREEN);
-    ratioRED = ( (float)RED / colorSUM );
-    ratioBLUE = ( (float)BLUE / colorSUM );
-    ratioGREEN = ( (float)GREEN / colorSUM );
-
-    ratioHIGHEST = ratioRED;
-    if ( ratioHIGHEST < ratioBLUE ) {
-      ratioHIGHEST = ratioBLUE;
-    }
-    if ( ratioHIGHEST < ratioGREEN ) {
-      ratioHIGHEST = ratioGREEN;
+    // Guard all-zero input so future color math in this function remains safe.
+    if (RED == 0 && GREEN == 0 && BLUE == 0) {
+      return;
     }
 }
 
 
+// Shift existing pixels and inject current POT color at the head.
+// POT4 controls animation speed.
 void color_picker() {
   int i; // A variable for looping
-  static long nextupdate=0l; // Time when next update of colors should occur.
-  long time = millis(); // Current time in milliseconds
 
   /* Move colors down the line by one */
   for(i=ACTIVELEDS-1;i>0;i--) {
@@ -490,9 +520,8 @@ void rainBling() {
     float hinterval;
     float sat;
     float v;
-    float flash_prob;
 
-    if ( 1 == DevSheildInstalled ) {
+    if ( 1 == DevShieldInstalled ) {
       speed_pot = analogRead(TCL_POT1);
       brightness_pot = analogRead(TCL_POT2);
       saturation_pot = analogRead(TCL_POT3);
@@ -541,6 +570,7 @@ void rainBling() {
 }
 
 
+// Estimate whether a Developer Shield is installed by sampling POT1 stability.
 void DevBoardDetect() {
   int i;
   int DevSheldTestCount = 0;
@@ -552,7 +582,7 @@ void DevBoardDetect() {
     }
   }
   if ( 5 >= DevSheldTestCount ) {
-    DevSheildInstalled = 1;
+    DevShieldInstalled = 1;
   }
 
 }
@@ -565,7 +595,6 @@ void blackout_strand() {
   }
   update_strand();
 }
-
 void whiteout_strand() {
   for(int i=0;i<MAXLEDS;i++) {
     strand[i][0]=255;
@@ -576,25 +605,43 @@ void whiteout_strand() {
 }
 
 
-
 int readSettingsFromEEPROM(int defaultLEDs) {
 
   SettingsObject tempVar; //Variable to store custom object read from EEPROM.
   EEPROM.get(0, tempVar);
 
-  if ( ((tempVar.NumberOfLEDs + 69) * 42) == tempVar.checksum) {
-    return(tempVar.NumberOfLEDs);
+  int safeDefault = clampLEDCount(defaultLEDs);
+
+  if (settingsChecksum(tempVar.NumberOfLEDs) == tempVar.checksum) {
+    int clampedStoredValue = clampLEDCount(tempVar.NumberOfLEDs);
+
+    // Self-heal EEPROM if old data was in-range invalid.
+    if (clampedStoredValue != tempVar.NumberOfLEDs) {
+      writeSettingsToEEPROM(clampedStoredValue);
+    }
+    return(clampedStoredValue);
   }
-  else {
-    return(defaultLEDs);
-  }
+
+  // Self-heal invalid EEPROM contents with a safe default.
+  writeSettingsToEEPROM(safeDefault);
+  return(safeDefault);
 }
 
+// Persist ACTIVELEDS only when needed, while preserving EEPROM lifetime.
 void writeSettingsToEEPROM(int currentLEDs) {
+  int safeLEDCount = clampLEDCount(currentLEDs);
+  SettingsObject existingSettings;
+  EEPROM.get(0, existingSettings);
+
+  // Avoid unnecessary EEPROM wear only when value and checksum are already valid.
+  if ((existingSettings.NumberOfLEDs == safeLEDCount) && (existingSettings.checksum == settingsChecksum(existingSettings.NumberOfLEDs))) {
+    return;
+  }
+
   //Data to store.
   SettingsObject tempVar = {
-    currentLEDs,
-    (( currentLEDs + 69) * 42)
+    safeLEDCount,
+    settingsChecksum(safeLEDCount)
   };
   EEPROM.put(0, tempVar);
 }
