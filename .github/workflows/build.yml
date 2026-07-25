@@ -31,7 +31,7 @@ jobs:
       - name: Install required libraries
         run: |
           arduino-cli lib install "FastLED"
-          arduino-cli lib install "coolneon_devshield"
+          arduino-cli lib install "CoolNeon DevShield"
 
       - name: Compile sketch
         run: |
