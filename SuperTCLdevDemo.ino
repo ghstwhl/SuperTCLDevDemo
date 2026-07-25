@@ -1,11 +1,19 @@
 /*****************************************************************************
  * SuperTCLdevDemo.ino
- * Version 1.2.3
+ * Version 2.0.0
  *
- * Code now detects for type of momentary switch, to compensate for a manufacturing
- * issue with the TCL Dev Shields, as well as whether a TCL Developer or Simple Board
- * is installed.  If a TCL Simple Board is installed, it defaults to running
+ * This sketch uses CoolNeon_DevShield for input aliases and initialization,
+ * and FastLED for writing pixel data to P9813-based strands.
+ *
+ * Code now detects the type of momentary switch, to compensate for a manufacturing
+ * issue with the CoolNeon Dev Shields, as well as whether a Developer or Simple Board
+ * is installed.  If a Simple Board is installed, it defaults to running
  * rainBling() with a set of visually appealing presets.
+ *
+ * New in 2.0.0
+ * Migration: Replaced arduino-tcl with CoolNeon_DevShield for shield inputs.
+ * Migration: Replaced TCL output calls with FastLED (P9813 data/clock output).
+ * Docs:      Updated comments to match current library usage and behavior.
  *
  * New in 1.2.3
  * Fix:     Hardened EEPROM settings handling.
@@ -21,23 +29,23 @@
  *          the EEPROM.
  *
  * New in 1.2.1
- * Fix:     fixed typos, and removed unused globals.
+ * Fix:     Fixed typos, and removed unused globals.
  *
  * New in 1.2
- * Feature: When you use TCL_MOMENTARY2 to adjust ACTIVELEDS (length of the strand),
+ * Feature: When you use MOMENTARY2 to adjust ACTIVELEDS (length of the strand),
  *          that value is stored in EEPROM so that it persists through power cycles.
  *          No more having to tweak the strand length every time you set up!
  * Fix:     All functions now utilize ACTIVELEDS, where some had been sloppy and
  *          ran out to MAXLEDS.
- * FIX:     RainBling now uses the same strand[MAXLEDS][3] data structure as all other
+ * Fix:     RainBling now uses the same strand[MAXLEDS][3] data structure as all other
  *          functions, reducing the memory requirements for the sketch.
  *
  * New in 1.1.4
- * fix:  Forgot to remove developer flag used in testing 1.1.3
+ * Fix:     Forgot to remove developer flag used in testing 1.1.3
  *
  * New in 1.1.3
- * Fix:  If Dev/Simple shield detect falsely identifies Simple, it can be reset by changing any of the switches or buttons.
- * Fix:  Resolved issue where strands larger than 25 didn't clear pixels after 25 when the length had not been manually adjusted.
+ * Fix:     If Dev/Simple shield detect falsely identifies Simple, it can be reset by changing any of the switches or buttons.
+ * Fix:     Resolved issue where strands larger than 25 didn't clear pixels after 25 when the length had not been manually adjusted.
  *
  * New in 1.1.x
  * User can dynamically adjust the length of the active pixels in the strand by holding
@@ -47,7 +55,7 @@
  *
  * rainBling() is a HSV rainbow, with bonus lightning effects.
  *
- * FireStrand() will send a flickering fire sequence down the strand of TCL pixels.
+ * FireStrand() will send a flickering fire sequence down the strand of pixels.
  * Several of the attributes are dynamically adjustable:
  *
  * Fire mode adjustments:
@@ -69,15 +77,19 @@
  * https://creativecommons.org/licenses/by-nc-sa/4.0/
  * https://creativecommons.org/licenses/by-nc-sa/4.0/legalcode
  ****************************************************************************/
-#include <SPI.h>
-#include <TCL.h>
+#include <CoolNeon_DevShield.h>
+#include <FastLED.h>
 #include <EEPROM.h>
 
+// LED strip configuration — change these defines when swapping to a different strip type.
+#define LED_CHIPSET       P9813       // Chipset family (e.g. WS2812B, WS2811, NEOPIXEL, P9813)
+#define LED_COLOR_ORDER   RGB         // Color order: RGB, GRB, BGR, etc.  Check your strip's datasheet.
 
-const int MAXLEDS = 400; // Maximum number of LEDs that this demo will address
-int ACTIVELEDS = 200;  // User can dynamically adjust this after program starts running
 
-byte strand[MAXLEDS][3]; // 0=R, 1=G, 2=B
+const int MAXLEDS = 100; // Maximum number of LEDs that this demo will address
+int ACTIVELEDS = 100;  // User can dynamically adjust this after program starts running
+
+CRGB leds[MAXLEDS];        // Pixel state buffer used for both effect generation and output
 
 // This structure is used to read and write values from EEPROM
 struct SettingsObject {
@@ -112,8 +124,8 @@ int SWITCHSTATE; // A single point of reference for the state of the switches
 
 int MOMENTARY1_Initial_State;
 int MOMENTARY2_Initial_State;
-int TCL_SWITCH1_Initial_State;
-int TCL_SWITCH2_Initial_State;
+int DEVSHIELD_SWITCH1_Initial_State;
+int DEVSHIELD_SWITCH2_Initial_State;
 
 /*
  * Control map (Developer Shield mode):
@@ -140,22 +152,23 @@ float rain_totem_interval;
 float rain_hval;
 //  END - Variables and constants for rainbling subroutine
 
-// This is for new code that tries to determine whether the TCL Developer Shield is installed, or the Simple Shield
+// This logic determines whether a Developer Shield is installed, or the Simple Shield.
 // Assume simple shield, unless proven otherwise
 int DevShieldInstalled = 0;
 
 
-// Initialize TCL hardware, restore persisted settings, and precompute gamma table.
+// Initialize Developer Shield inputs, FastLED output, restore settings, and precompute gamma table.
 void setup() {
-  TCL.begin();
-  TCL.setupDeveloperShield();
+  DevShield.begin();
+  FastLED.addLeds<LED_CHIPSET, DEVSHIELD_DATAPIN, DEVSHIELD_CLOCKPIN, LED_COLOR_ORDER>(leds, MAXLEDS);
+  FastLED.clear(true);
 
   ACTIVELEDS = readSettingsFromEEPROM(ACTIVELEDS);
 
-  MOMENTARY1_Initial_State = digitalRead(TCL_MOMENTARY1);
-  MOMENTARY2_Initial_State = digitalRead(TCL_MOMENTARY2);
-  TCL_SWITCH1_Initial_State = digitalRead(TCL_SWITCH1);
-  TCL_SWITCH2_Initial_State = digitalRead(TCL_SWITCH2);
+  MOMENTARY1_Initial_State = digitalRead(DEVSHIELD_MOMENTARY1);
+  MOMENTARY2_Initial_State = digitalRead(DEVSHIELD_MOMENTARY2);
+  DEVSHIELD_SWITCH1_Initial_State = digitalRead(DEVSHIELD_SWITCH1);
+  DEVSHIELD_SWITCH2_Initial_State = digitalRead(DEVSHIELD_SWITCH2);
 
   DevBoardDetect();
 //  whiteout_strand();
@@ -189,7 +202,19 @@ void loop() {
 
 }
 
-// Fire-like animation.
+CRGB transformPixel(uint8_t red, uint8_t green, uint8_t blue) {
+  if (digitalRead(DEVSHIELD_MOMENTARY1) != MOMENTARY1_Initial_State) {
+    if (3 == SWITCHSTATE) {
+      // Deliberate channel swap for this mode.
+      return CRGB(green, blue, red);
+    }
+    return CRGB((red ^ 255), (green ^ 255), (blue ^ 255));
+  }
+
+  return CRGB(red, green, blue);
+}
+
+// Fire-like animation written through the leds buffer and FastLED output.
 // POT1: speed, POT3: warmth/chromatography, POT4: intensity.
 void FireStrand() {
   int i;
@@ -200,40 +225,23 @@ void FireStrand() {
   int delaytime;
   int strandlength;
 
-  intensity=(float)map(analogRead(TCL_POT4), 0, 1023, 0, 100)/100;
-  chromatography=(float)map(analogRead(TCL_POT3), 0, 1023, 0, 50)/100;
+  intensity=(float)map(analogRead(DEVSHIELD_POT4), 0, 1023, 0, 100)/100;
+  chromatography=(float)map(analogRead(DEVSHIELD_POT3), 0, 1023, 0, 50)/100;
   strandlength=ACTIVELEDS;
-  delaytime=(int)map(analogRead(TCL_POT1), 0, 1023, 150, 0);
+  delaytime=(int)map(analogRead(DEVSHIELD_POT1), 0, 1023, 150, 0);
 
-  TCL.sendEmptyFrame();
   for(i=0;i<strandlength;i++) {
     red=(int)(random(0,256) * intensity);
     green=(int)(random(0,(red * chromatography +1)) * intensity);
-    sendPixelData(red,green,0);
+    leds[i] = CRGB(red, green, 0);
   }
   while (i < MAXLEDS) {
-    TCL.sendColor(0,0,0);
+    leds[i] = CRGB::Black;
     i++;
   }
-  TCL.sendEmptyFrame();
+  update_strand();
   delay(delaytime);
 
-}
-
-
-void sendPixelData( int red, int green, int blue) {
-
-  if (digitalRead(TCL_MOMENTARY1) != MOMENTARY1_Initial_State) {
-    if ( 3 == SWITCHSTATE ) {
-      TCL.sendColor(green, blue, red);  // The colors are a LIE!  On this line ONLY they are deliberately swapped!
-    }
-    else {
-      TCL.sendColor((red ^ 255), (green ^ 255), (blue ^ 255));
-    }
-  }
-  else {
-    TCL.sendColor(red, green, blue);
-  }
 }
 
 
@@ -244,7 +252,7 @@ void CheckSwitches() {
   // This allows Simple Shield Mode to be disabled if a switch change is detected.
   // This helps defend against false positives in the shield detection code.
   if ( 0 == DevShieldInstalled ) {
-    if ( (TCL_SWITCH1_Initial_State != digitalRead(TCL_SWITCH1)) || (TCL_SWITCH2_Initial_State != digitalRead(TCL_SWITCH2)) || (digitalRead(TCL_MOMENTARY1) != MOMENTARY1_Initial_State) || (digitalRead(TCL_MOMENTARY2) != MOMENTARY2_Initial_State) ) {
+    if ( (DEVSHIELD_SWITCH1_Initial_State != digitalRead(DEVSHIELD_SWITCH1)) || (DEVSHIELD_SWITCH2_Initial_State != digitalRead(DEVSHIELD_SWITCH2)) || (digitalRead(DEVSHIELD_MOMENTARY1) != MOMENTARY1_Initial_State) || (digitalRead(DEVSHIELD_MOMENTARY2) != MOMENTARY2_Initial_State) ) {
       DevShieldInstalled = 1;
       reset_strand();
     }
@@ -252,34 +260,33 @@ void CheckSwitches() {
 
   // This loop lets the user adjust the strand length by holding down Momentary 1 (Pin 4)
   // and turning the lower right Analog Potentiometer (Pin 0)
-  if (digitalRead(TCL_MOMENTARY2) != MOMENTARY2_Initial_State) {
-    while (digitalRead(TCL_MOMENTARY2) != MOMENTARY2_Initial_State) {
+  if (digitalRead(DEVSHIELD_MOMENTARY2) != MOMENTARY2_Initial_State) {
+    while (digitalRead(DEVSHIELD_MOMENTARY2) != MOMENTARY2_Initial_State) {
       int led_position;
-      ACTIVELEDS=(int)map(analogRead(TCL_POT2), 0, 1023, 1, MAXLEDS);
-      TCL.sendEmptyFrame();
+      ACTIVELEDS=(int)map(analogRead(DEVSHIELD_POT2), 0, 1023, 1, MAXLEDS);
       for (led_position = 1; led_position < ACTIVELEDS; led_position++) {
-        TCL.sendColor(255,0,0);
+        leds[led_position - 1] = CRGB(255, 0, 0);
       }
-      TCL.sendColor(0,0,255);
+      leds[led_position - 1] = CRGB(0, 0, 255);
       led_position++;
       while (led_position < MAXLEDS) {
-        TCL.sendColor(0,0,0);
+        leds[led_position - 1] = CRGB::Black;
         led_position++;
       }
-      TCL.sendEmptyFrame();
+      update_strand();
     }
     writeSettingsToEEPROM(ACTIVELEDS);
   }
 
 
   if ( 1 == DevShieldInstalled ) {
-    if (digitalRead(TCL_SWITCH1) == 0 && digitalRead(TCL_SWITCH2) == 0){
+    if (digitalRead(DEVSHIELD_SWITCH1) == 0 && digitalRead(DEVSHIELD_SWITCH2) == 0){
       SWITCHSTATE = 3;
     }
-    else if (digitalRead(TCL_SWITCH1) == 0 && digitalRead(TCL_SWITCH2) == 1){
+    else if (digitalRead(DEVSHIELD_SWITCH1) == 0 && digitalRead(DEVSHIELD_SWITCH2) == 1){
       SWITCHSTATE = 2;
     }
-    else if (digitalRead(TCL_SWITCH1) == 1 && digitalRead(TCL_SWITCH2) == 0){
+    else if (digitalRead(DEVSHIELD_SWITCH1) == 1 && digitalRead(DEVSHIELD_SWITCH2) == 0){
       SWITCHSTATE = 1;
     }
     else{
@@ -298,26 +305,23 @@ void reset_strand() {
   int i;
 
   for(i=0;i<MAXLEDS;i++) {
-    strand[i][0]=0;  // R
-    strand[i][1]=0;  // G
-    strand[i][2]=0;  // B
+    leds[i] = CRGB::Black;
   }
-  update_strand();
+  FastLED.show();
 }
 
 
 void update_strand() {
   int i;  // A local instance of 'i' so we don't interfere with other loops
 
-  TCL.sendEmptyFrame();
   for(i=0;i<ACTIVELEDS;i++) {
-    sendPixelData(strand[i][0],strand[i][1],strand[i][2]);
+    leds[i] = transformPixel(leds[i].r, leds[i].g, leds[i].b);
   }
   while (i < MAXLEDS) {
-      TCL.sendColor(0,0,0);
+      leds[i] = CRGB::Black;
       i++;
     }
-  TCL.sendEmptyFrame();
+  FastLED.show();
 }
 
 // Scanner effect with trailing fade.
@@ -332,27 +336,23 @@ void cylon_eye() {
     // Forward color sweep
     for(i=0; i<ACTIVELEDS;i++){
       check_color_pots();
-      strand[i][0]=RED;
-      strand[i][1]=GREEN;
-      strand[i][2]=BLUE;
+      leds[i] = CRGB(RED, GREEN, BLUE);
       for(j=1;j<=10;j++) {
         pos=i-j;
         if(pos>=0) {
-          strand[pos][0] = strand[pos][0] / 2;
-          strand[pos][1] = strand[pos][1] / 2;
-          strand[pos][2] = strand[pos][2] / 2;
+          leds[pos].r = leds[pos].r / 2;
+          leds[pos].g = leds[pos].g / 2;
+          leds[pos].b = leds[pos].b / 2;
         }
       }
 
       // Empty out all trailing LEDs.  This prevents 'orphans' when dynamically shortening the tail length.
       for(pos=i-j; pos>=0;pos--){
-        strand[pos][0]=0;
-        strand[pos][1]=0;
-        strand[pos][2]=0;
+        leds[pos] = CRGB::Black;
       }
 
       update_strand(); // Send all the pixels out
-      delay(map(analogRead(TCL_POT4), 0, 1023, DELAYLOW, DELAYHIGH));
+      delay(map(analogRead(DEVSHIELD_POT4), 0, 1023, DELAYLOW, DELAYHIGH));
 
       CheckSwitches();
       if ( 2 != SWITCHSTATE ) {
@@ -368,27 +368,23 @@ void cylon_eye() {
     // Reverse color sweep
     for(i=ACTIVELEDS-1; i>=0;i--){
       check_color_pots();
-      strand[i][0]=RED;
-      strand[i][1]=GREEN;
-      strand[i][2]=BLUE;
+      leds[i] = CRGB(RED, GREEN, BLUE);
       for(j=1;j<=10;j++) {
         pos=i+j;
         if(pos<ACTIVELEDS) {
-          strand[pos][0] = strand[pos][0] / 2;
-          strand[pos][1] = strand[pos][1] / 2;
-          strand[pos][2] = strand[pos][2] / 2;
+          leds[pos].r = leds[pos].r / 2;
+          leds[pos].g = leds[pos].g / 2;
+          leds[pos].b = leds[pos].b / 2;
         }
       }
 
     // Empty out all trailing LEDs.  This prevents 'orphans' when dynamically shortening the tail length.
       for(pos=i+j; pos<ACTIVELEDS;pos++){
-        strand[pos][0]=0;
-        strand[pos][1]=0;
-        strand[pos][2]=0;
+        leds[pos] = CRGB::Black;
       }
 
       update_strand(); // Send all the pixels out
-      delay(map(analogRead(TCL_POT4), 0, 1023, DELAYLOW, DELAYHIGH));
+      delay(map(analogRead(DEVSHIELD_POT4), 0, 1023, DELAYLOW, DELAYHIGH));
 
       CheckSwitches();
       if ( 2 != SWITCHSTATE ) {
@@ -403,11 +399,11 @@ void cylon_eye() {
 // Read current RGB color from POT1-3.
 void check_color_pots() {
     /* Read the current red value from potentiometer 0 */
-    RED=map(analogRead(TCL_POT1), 0, 1023, 0, 255);
+  RED=map(analogRead(DEVSHIELD_POT1), 0, 1023, 0, 255);
     /* Read the current green value from potentiometer 1 */
-    GREEN=map(analogRead(TCL_POT2), 0, 1023, 0, 255);
+  GREEN=map(analogRead(DEVSHIELD_POT2), 0, 1023, 0, 255);
     /* Read the current blue value from potentiometer 2 */
-    BLUE=map(analogRead(TCL_POT3), 0, 1023, 0, 255);
+  BLUE=map(analogRead(DEVSHIELD_POT3), 0, 1023, 0, 255);
 
     // Guard all-zero input so future color math in this function remains safe.
     if (RED == 0 && GREEN == 0 && BLUE == 0) {
@@ -423,23 +419,21 @@ void color_picker() {
 
   /* Move colors down the line by one */
   for(i=ACTIVELEDS-1;i>0;i--) {
-    strand[i][0]=strand[i-1][0];
-    strand[i][1]=strand[i-1][1];
-    strand[i][2]=strand[i-1][2];
+    leds[i] = leds[i-1];
   }
   /* Read the current red value from potentiometer 1
    * Values are 10 bit and must be left shifted by 2 in order to fit in 8
    * bits */
-  strand[0][0]=analogRead(TCL_POT1)>>2;
+  leds[0].r=analogRead(DEVSHIELD_POT1)>>2;
 
   /* Read the current green value from potentiometer 2 */
-  strand[0][1]=analogRead(TCL_POT2)>>2;
+  leds[0].g=analogRead(DEVSHIELD_POT2)>>2;
 
   /* Read the current blue value from potentiometer 3 */
-  strand[0][2]=analogRead(TCL_POT3)>>2;
+  leds[0].b=analogRead(DEVSHIELD_POT3)>>2;
 
   update_strand(); // Send all the pixels out
-  delay( (int)map(analogRead(TCL_POT4), 0, 1023, 150, 0) );
+  delay( (int)map(analogRead(DEVSHIELD_POT4), 0, 1023, 150, 0) );
 
   /* Check if the button is pressed and if we have to send a color choice to serial */
 }
@@ -522,10 +516,10 @@ void rainBling() {
     float v;
 
     if ( 1 == DevShieldInstalled ) {
-      speed_pot = analogRead(TCL_POT1);
-      brightness_pot = analogRead(TCL_POT2);
-      saturation_pot = analogRead(TCL_POT3);
-      flash_pot = analogRead(TCL_POT4);
+      speed_pot = analogRead(DEVSHIELD_POT1);
+      brightness_pot = analogRead(DEVSHIELD_POT2);
+      saturation_pot = analogRead(DEVSHIELD_POT3);
+      flash_pot = analogRead(DEVSHIELD_POT4);
     }
     else {
       speed_pot = 497;
@@ -543,12 +537,10 @@ void rainBling() {
         local_h-=360.0;
       }
       if(random(rain_flash_prob_max)<flash_pot) {
-        strand[i][0]=255;
-        strand[i][1]=255;
-        strand[i][2]=255;
+        leds[i] = CRGB::White;
       }
       else {
-        rain_HSVtoRGB(local_h,sat,v,&strand[i][0],&strand[i][1],&strand[i][2]);
+        rain_HSVtoRGB(local_h,sat,v,&leds[i].r,&leds[i].g,&leds[i].b);
       }
       CheckSwitches();
     }
@@ -575,9 +567,9 @@ void DevBoardDetect() {
   int i;
   int DevSheldTestCount = 0;
   int DevSheldTest;
-  DevSheldTest = analogRead(TCL_POT1);
+  DevSheldTest = analogRead(DEVSHIELD_POT1);
   for(i=0; i<10; i++) {
-    if ( (analogRead(TCL_POT1) < (DevSheldTest - 1) ) || (analogRead(TCL_POT1) > (DevSheldTest + 1) )    ) {
+    if ( (analogRead(DEVSHIELD_POT1) < (DevSheldTest - 1) ) || (analogRead(DEVSHIELD_POT1) > (DevSheldTest + 1) )    ) {
       DevSheldTestCount++;
     }
   }
@@ -589,19 +581,15 @@ void DevBoardDetect() {
 
 void blackout_strand() {
   for(int i=0;i<MAXLEDS;i++) {
-    strand[i][0]=0;
-    strand[i][1]=0;
-    strand[i][2]=0;
+    leds[i] = CRGB::Black;
   }
-  update_strand();
+  FastLED.show();
 }
 void whiteout_strand() {
   for(int i=0;i<MAXLEDS;i++) {
-    strand[i][0]=255;
-    strand[i][1]=255;
-    strand[i][2]=255;
+    leds[i] = CRGB::White;
   }
-  update_strand();
+  FastLED.show();
 }
 
 
