@@ -1,0 +1,47 @@
+name: Build Sketch
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  push:
+    branches: [main, master]
+
+jobs:
+  arduino-lint:
+    name: Arduino Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: arduino/arduino-lint-action@v2
+        with:
+          project-type: sketch
+
+  test-build:
+    name: Test Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install Arduino CLI
+        run: |
+          mkdir -p "$HOME/bin"
+          curl -fsSL https://github.com/arduino/arduino-cli/releases/download/v1.2.0/arduino-cli_1.2.0_Linux_64bit.tar.gz \
+            | tar xz -C "$HOME/bin" arduino-cli
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Install Arduino AVR core
+        run: |
+          arduino-cli core update-index
+          arduino-cli core install arduino:avr
+
+      - name: Install required libraries
+        run: |
+          arduino-cli lib install "FastLED"
+          arduino-cli lib install "CoolNeon DevShield"
+
+      - name: Compile sketch
+        run: |
+          arduino-cli compile --fqbn arduino:avr:uno SuperTCLDevDemo.ino
