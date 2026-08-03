@@ -207,6 +207,9 @@ float rain_hval;
 // Assume simple shield, unless proven otherwise
 int DevShieldInstalled = 0;
 
+// Forward declarations for helper functions defined later in the file.
+bool stableRead(int pin, int targetState, unsigned long debounceDelay = 20);
+void responsiveDelay(unsigned long ms);
 
 // Initialize Developer Shield inputs, FastLED output, and restore settings from EEPROM.
 void setup() {
