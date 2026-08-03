@@ -1,6 +1,6 @@
 /*****************************************************************************
  * SuperTCLDevDemo.ino
- * Version 2.0.1
+ * Version 2.0.2
  *
  * This sketch uses CoolNeon_DevShield for input aliases and initialization,
  * and FastLED for writing pixel data to P9813-based strands.
@@ -9,6 +9,21 @@
  * issue with the CoolNeon Dev Shields, as well as whether a Developer or Simple Board
  * is installed.  If a Simple Board is installed, it defaults to running
  * rainBling() with a set of visually appealing presets.
+ *
+ * New in 2.0.2
+ * Fix:     Strand-length adjustment loop now has a 5-second timeout, preventing
+ *          device lockup if MOMENTARY2 sticks or is misread at boot.
+ * Fix:     Added switch debouncing (stableRead) to eliminate mode flicker from
+ *          noisy contacts on SWITCH1/SWITCH2/MOMENTARY1/MOMENTARY2.
+ * Fix:     Replaced all bare delay() calls with responsiveDelay(), which polls
+ *          CheckSwitches() during wait intervals so mode changes and button
+ *          presses are no longer missed during effect delays.
+ * Perf:    Moved const float/int rain constants to #define macros, eliminating
+ *          SRAM usage for compile-time scalar values.
+ * Cleanup: Removed dead rain_gamma variable (declared but never referenced).
+ * Cleanup: Removed no-op all-zero guard in check_color_pots().
+ * Fix:     Widened DevBoardDetect() ADC tolerance from ±1 to ±3 LSBs to reduce
+ *          false positives from normal ADC noise on stable potentiometers.
  *
  * New in 2.0.1
  * Perf:    Moved gamma-correction lookup table (256 bytes) from SRAM to PROGMEM
@@ -180,11 +195,10 @@ const PROGMEM byte rain_gamma_table[256] = {
   153,155,157,158,160,162,163,165,167,168,170,172,174,175,177,179,
   181,182,184,186,188,189,191,193,195,197,198,200,202,204,206,207
 };
-const float rain_gamma = 2.2;
-const float rain_hinterval_max = 10.0;
-const float rain_v_max = 0.99;
-const float rain_sat_max = 1.0;
-const int rain_flash_prob_max=20480;
+#define RAIN_HINTERVAL_MAX  10.0f
+#define RAIN_V_MAX          0.99f
+#define RAIN_SAT_MAX        1.0f
+#define RAIN_FLASH_PROB_MAX 20480
 float rain_totem_interval;
 float rain_hval;
 //  END - Variables and constants for rainbling subroutine
@@ -258,7 +272,7 @@ void FireStrand() {
     i++;
   }
   update_strand();
-  delay(delaytime);
+  responsiveDelay(delaytime);
 
 }
 
@@ -270,7 +284,7 @@ void CheckSwitches() {
   // This allows Simple Shield Mode to be disabled if a switch change is detected.
   // This helps defend against false positives in the shield detection code.
   if ( 0 == DevShieldInstalled ) {
-    if ( (DEVSHIELD_SWITCH1_Initial_State != digitalRead(DEVSHIELD_SWITCH1)) || (DEVSHIELD_SWITCH2_Initial_State != digitalRead(DEVSHIELD_SWITCH2)) || (digitalRead(DEVSHIELD_MOMENTARY1) != MOMENTARY1_Initial_State) || (digitalRead(DEVSHIELD_MOMENTARY2) != MOMENTARY2_Initial_State) ) {
+    if ( stableRead(DEVSHIELD_SWITCH1, !DEVSHIELD_SWITCH1_Initial_State) || stableRead(DEVSHIELD_SWITCH2, !DEVSHIELD_SWITCH2_Initial_State) || stableRead(DEVSHIELD_MOMENTARY1, !MOMENTARY1_Initial_State) || stableRead(DEVSHIELD_MOMENTARY2, !MOMENTARY2_Initial_State) ) {
       DevShieldInstalled = 1;
       reset_strand();
     }
@@ -278,8 +292,10 @@ void CheckSwitches() {
 
   // This loop lets the user adjust the strand length by holding down Momentary 1 (Pin 4)
   // and turning the lower right Analog Potentiometer (Pin 0)
-  if (digitalRead(DEVSHIELD_MOMENTARY2) != MOMENTARY2_Initial_State) {
+  if (stableRead(DEVSHIELD_MOMENTARY2, !MOMENTARY2_Initial_State)) {
+    unsigned long lenAdjStart = millis();
     while (digitalRead(DEVSHIELD_MOMENTARY2) != MOMENTARY2_Initial_State) {
+      if (millis() - lenAdjStart > 5000) break;  // Timeout: prevent lockup if button sticks
       int led_position;
       ACTIVELEDS=(int)map(analogRead(DEVSHIELD_POT2), 0, 1023, 1, MAXLEDS);
       for (led_position = 1; led_position < ACTIVELEDS; led_position++) {
@@ -298,13 +314,15 @@ void CheckSwitches() {
 
 
   if ( 1 == DevShieldInstalled ) {
-    if (digitalRead(DEVSHIELD_SWITCH1) == 0 && digitalRead(DEVSHIELD_SWITCH2) == 0){
+    bool sw1 = stableRead(DEVSHIELD_SWITCH1, 0);
+    bool sw2 = stableRead(DEVSHIELD_SWITCH2, 0);
+    if (sw1 && sw2) {
       SWITCHSTATE = 3;
     }
-    else if (digitalRead(DEVSHIELD_SWITCH1) == 0 && digitalRead(DEVSHIELD_SWITCH2) == 1){
+    else if (sw1 && !sw2) {
       SWITCHSTATE = 2;
     }
-    else if (digitalRead(DEVSHIELD_SWITCH1) == 1 && digitalRead(DEVSHIELD_SWITCH2) == 0){
+    else if (!sw1 && sw2) {
       SWITCHSTATE = 1;
     }
     else{
@@ -386,7 +404,7 @@ void cylon_eye() {
       }
 
       update_strand(); // Send all the pixels out
-      delay(map(analogRead(DEVSHIELD_POT4), 0, 1023, DELAYLOW, DELAYHIGH));
+      responsiveDelay(map(analogRead(DEVSHIELD_POT4), 0, 1023, DELAYLOW, DELAYHIGH));
 
       CheckSwitches();
       if ( 2 != SWITCHSTATE ) {
@@ -418,7 +436,7 @@ void cylon_eye() {
       }
 
       update_strand(); // Send all the pixels out
-      delay(map(analogRead(DEVSHIELD_POT4), 0, 1023, DELAYLOW, DELAYHIGH));
+      responsiveDelay(map(analogRead(DEVSHIELD_POT4), 0, 1023, DELAYLOW, DELAYHIGH));
 
       CheckSwitches();
       if ( 2 != SWITCHSTATE ) {
@@ -438,11 +456,6 @@ void check_color_pots() {
   GREEN=map(analogRead(DEVSHIELD_POT2), 0, 1023, 0, 255);
     /* Read the current blue value from potentiometer 2 */
   BLUE=map(analogRead(DEVSHIELD_POT3), 0, 1023, 0, 255);
-
-    // Guard all-zero input so future color math in this function remains safe.
-    if (RED == 0 && GREEN == 0 && BLUE == 0) {
-      return;
-    }
 }
 
 
@@ -467,7 +480,7 @@ void color_picker() {
   leds[0].b=analogRead(DEVSHIELD_POT3)>>2;
 
   update_strand(); // Send all the pixels out
-  delay( (int)map(analogRead(DEVSHIELD_POT4), 0, 1023, 150, 0) );
+  responsiveDelay( (int)map(analogRead(DEVSHIELD_POT4), 0, 1023, 150, 0) );
 
   /* Check if the button is pressed and if we have to send a color choice to serial */
 }
@@ -562,15 +575,15 @@ void rainBling() {
       flash_pot = 832;
     }
 
-    v = rain_v_max/1023.0*brightness_pot;
-    sat = rain_sat_max/1023.0*saturation_pot;
+    v = RAIN_V_MAX/1023.0*brightness_pot;
+    sat = RAIN_SAT_MAX/1023.0*saturation_pot;
 
     for(i=0;i<ACTIVELEDS;i++) {
       local_h = rain_hval+i*rain_totem_interval;
       while(local_h>=360.0) {
         local_h-=360.0;
       }
-      if(random(rain_flash_prob_max)<flash_pot) {
+      if(random(RAIN_FLASH_PROB_MAX)<flash_pot) {
         leds[i] = CRGB::White;
       }
       else {
@@ -580,8 +593,8 @@ void rainBling() {
     }
 
     update_strand();
-    delay(25);
-    hinterval = rain_hinterval_max/1023.0*speed_pot;
+    responsiveDelay(25);
+    hinterval = RAIN_HINTERVAL_MAX/1023.0*speed_pot;
     rain_hval+=hinterval;
     while(rain_hval>=360.0) {
       rain_hval-=360.0;
@@ -603,7 +616,7 @@ void DevBoardDetect() {
   int DevSheldTest;
   DevSheldTest = analogRead(DEVSHIELD_POT1);
   for(i=0; i<10; i++) {
-    if ( (analogRead(DEVSHIELD_POT1) < (DevSheldTest - 1) ) || (analogRead(DEVSHIELD_POT1) > (DevSheldTest + 1) )    ) {
+    if ( (analogRead(DEVSHIELD_POT1) < (DevSheldTest - 3) ) || (analogRead(DEVSHIELD_POT1) > (DevSheldTest + 3) )    ) {
       DevSheldTestCount++;
     }
   }
@@ -611,6 +624,23 @@ void DevBoardDetect() {
     DevShieldInstalled = 1;
   }
 
+}
+
+// Returns true only when pin stably reads targetState across debounceDelay ms.
+// Uses a brief blocking delay — call only at state-transition checkpoints, not in tight loops.
+bool stableRead(int pin, int targetState, unsigned long debounceDelay = 20) {
+  if (digitalRead(pin) != targetState) return false;
+  delay(debounceDelay);
+  return (digitalRead(pin) == targetState);
+}
+
+// Non-blocking delay: waits ms milliseconds while still checking for input changes.
+// Allows mode switches and button presses to be processed during what were dead intervals.
+void responsiveDelay(unsigned long ms) {
+  unsigned long start = millis();
+  while (millis() - start < ms) {
+    CheckSwitches();
+  }
 }
 
 void blackout_strand() {
